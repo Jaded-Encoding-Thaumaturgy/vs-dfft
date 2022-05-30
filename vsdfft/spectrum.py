@@ -28,11 +28,13 @@ def _fast_roll(fdst: Any, fsrc: Any, yh: int, xh: int) -> None:
 
 
 def _fftspectrum_cpu_modifyframe(
-    f: List[vs.VideoFrame], n: int, fftw_obj: Any, rollfunc: Any
+    f: List[vs.VideoFrame], n: int, rollfunc: Any, fftw_obj: Any
 ) -> vs.VideoFrame:
     fdst = f[1].copy()
 
-    farr: np.typing.NDArray[np.complex64] = np.asarray(f[0][0]).astype(np.complex64)
+    farr: np.typing.NDArray[np.complex64] = np.asarray(f[0][0])
+    farr = np.ascontiguousarray(farr)
+    farr = farr.astype(np.complex64)
 
     fftw_obj(farr, fftw_obj.output_array)
 
@@ -46,23 +48,17 @@ def _fftspectrum_cpu_modifyframe(
 if cuda_available:
     def _fftspectrum_gpu_modifyframe(
         f: List[vs.VideoFrame], n: int, threshold: float,
-        rollfunc: Any, fft_out_arr: cupy.typing.NDArray[cupy.complex64],
-        cuda_plan: Any, cuda_fout: cupy.typing.NDArray[cupy.uint8]
+        rollfunc: Any, cuda_plan: Any, fout: cupy.typing.NDArray[cupy.complex64]
     ) -> vs.VideoFrame:
         fdst = f[1].copy()
 
         farr = cupy.asarray(f[0][0])
-
         farr = cupy.ascontiguousarray(farr)
-
         farr = farr.astype(cupy.complex64)
 
-        if (is_cuda_101):
-            farr = farr.copy()
+        cuda_plan.fft(farr, fout, cufft.CUFFT_FORWARD)
 
-        cuda_plan.fft(farr, cuda_fout, cufft.CUFFT_FORWARD)
-
-        fft_norm = cupy.log(cupy.abs(cuda_fout.real))
+        fft_norm = cupy.log(cupy.abs(fout.real))
 
         maxval = fft_norm[0][0]
 
@@ -70,9 +66,9 @@ if cuda_available:
             fft_norm > (maxval / threshold), fft_norm * (_scale_val / maxval), 0
         ).clip(0, 255)
 
-        rollfunc(fft_out_arr, fft_norm.astype(cupy.uint8))
+        rollfunc(fout.real, fft_norm)
 
-        fft_out_arr.get(cuda_stream, 'C', np.asarray(fdst[0]))
+        fout.real.astype(cupy.uint8).get(cuda_stream, 'C', np.asarray(fdst[0]))
 
         return fdst
 
@@ -104,7 +100,6 @@ def FFTSpectrum(
 
     if cache_key not in _fft_modifyframe_cache:
         if cuda:
-            fft_out_aligned_zeros = cupy.empty(shape, cupy.uint8, 'C')
             fft_cuplan_zeros = cupy.empty(shape, cupy.complex64, 'C')
 
             cuda_plan = cupyx.scipy.fftpack.get_fft_plan(
@@ -122,8 +117,7 @@ def FFTSpectrum(
         if cuda:
             _fft_modifyframe_cache[cache_key] = partial(
                 _fftspectrum_gpu_modifyframe,
-                rollfunc=rollfunc, fft_out_arr=fft_out_aligned_zeros,
-                cuda_plan=cuda_plan, cuda_fout=fft_cuplan_zeros
+                rollfunc=rollfunc, cuda_plan=cuda_plan, fout=fft_cuplan_zeros
             )
         else:
             _fft_modifyframe_cache[cache_key] = partial(

@@ -22,6 +22,6 @@ else:
 
 fftw_cpu_kwargs = {
     'axes': (0, 1),
-    'flags': ['FFTW_ESTIMATE', 'FFTW_UNALIGNED'],
+    'flags': ['FFTW_MEASURE'],
     'threads': multiprocessing.cpu_count()
 }
