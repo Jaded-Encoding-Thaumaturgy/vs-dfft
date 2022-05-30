@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import multiprocessing
 from functools import partial
 from math import floor
 from typing import Any, Callable, Dict, List, Tuple
@@ -9,21 +8,13 @@ import numpy as np
 import vapoursynth as vs
 from pyfftw import FFTW, empty_aligned  # type: ignore
 
+from .utils import (
+    cuda_available, cuda_error, cuda_stream, cufft, cupy, cupyx, fftw_cpu_kwargs, is_cuda_101
+)
+
 core = vs.core
 
 __all__ = ['FFTSpectrum']
-
-
-try:
-    import cupy  # type: ignore
-    import cupyx  # type: ignore
-    from cupy.cuda import cufft  # type: ignore
-
-    cuda_error = None
-    cuda_available = True
-except ImportError as e:
-    cuda_error = e
-    cuda_available = False
 
 
 def _fast_roll(fdst: Any, fsrc: Any, yh: int, xh: int) -> None:
@@ -31,13 +22,6 @@ def _fast_roll(fdst: Any, fsrc: Any, yh: int, xh: int) -> None:
     fdst[:-yh, -xh:] = fsrc[yh:, :xh]
     fdst[-yh:, :-xh] = fsrc[:yh, xh:]
     fdst[-yh:, -xh:] = fsrc[:yh, :xh]
-
-
-fftw_cpu_kwargs = {
-    'axes': (0, 1),
-    'flags': ['FFTW_ESTIMATE', 'FFTW_UNALIGNED'],
-    'threads': multiprocessing.cpu_count()
-}
 
 
 def _fftspectrum_cpu_modifyframe(
@@ -58,10 +42,6 @@ def _fftspectrum_cpu_modifyframe(
 
 
 if cuda_available:
-    is_cuda_101 = 10010 <= cupy.cuda.runtime.runtimeGetVersion()
-
-    cuda_stream = cupy.cuda.Stream(True, True, True)
-
     def _fftspectrum_gpu_modifyframe(
         f: List[vs.VideoFrame], n: int, fft_thr: float, fft_scale: float,
         rollfunc: Any, fft_out_arr: cupy.typing.NDArray[cupy.complex64],
