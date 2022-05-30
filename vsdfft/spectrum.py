@@ -17,6 +17,9 @@ core = vs.core
 __all__ = ['FFTSpectrum']
 
 
+_scale_val = 297.8690509933263
+
+
 def _fast_roll(fdst: Any, fsrc: Any, yh: int, xh: int) -> None:
     fdst[:-yh, :-xh] = fsrc[yh:, xh:]
     fdst[:-yh, -xh:] = fsrc[yh:, :xh]
@@ -25,25 +28,24 @@ def _fast_roll(fdst: Any, fsrc: Any, yh: int, xh: int) -> None:
 
 
 def _fftspectrum_cpu_modifyframe(
-    f: List[vs.VideoFrame], n: int,
-    rollfunc: Any, fft_out_arr: np.typing.NDArray[np.complex64]
+    f: List[vs.VideoFrame], n: int, fftw_obj: Any, rollfunc: Any
 ) -> vs.VideoFrame:
     fdst = f[1].copy()
 
     farr: np.typing.NDArray[np.complex64] = np.asarray(f[0][0]).astype(np.complex64)
 
-    FFTW(farr, fft_out_arr, **fftw_cpu_kwargs).execute()
+    fftw_obj(farr, fftw_obj.output_array)
 
     fdst_arr: np.typing.NDArray[np.float32] = np.asarray(fdst[0])
 
-    rollfunc(fdst_arr, fft_out_arr.real)
+    rollfunc(fdst_arr, fftw_obj.output_array.real)
 
     return fdst
 
 
 if cuda_available:
     def _fftspectrum_gpu_modifyframe(
-        f: List[vs.VideoFrame], n: int, fft_thr: float, fft_scale: float,
+        f: List[vs.VideoFrame], n: int, threshold: float,
         rollfunc: Any, fft_out_arr: cupy.typing.NDArray[cupy.complex64],
         cuda_plan: Any, cuda_fout: cupy.typing.NDArray[cupy.uint8]
     ) -> vs.VideoFrame:
@@ -60,13 +62,15 @@ if cuda_available:
 
         cuda_plan.fft(farr, cuda_fout, cufft.CUFFT_FORWARD)
 
-        fft_norm = cupy.abs(cupy.log(cupy.sqrt(cupy.abs(cuda_fout.real))))
+        fft_norm = cupy.log(cupy.abs(cuda_fout.real))
 
-        fft_norm = cupy.where(fft_norm > fft_thr, fft_norm * fft_scale, 0)
+        maxval = fft_norm[0][0]
 
-        fft_norm = fft_norm.astype(cupy.uint8)
+        fft_norm = cupy.where(
+            fft_norm > (maxval / threshold), fft_norm * (_scale_val / maxval), 0
+        ).clip(0, 255)
 
-        rollfunc(fft_out_arr, fft_norm)
+        rollfunc(fft_out_arr, fft_norm.astype(cupy.uint8))
 
         fft_out_arr.get(cuda_stream, 'C', np.asarray(fdst[0]))
 
@@ -87,11 +91,11 @@ def FFTSpectrum(
             f"FFTSpectrum: Cuda acceleration isn't available!\nError: `{cuda_error}`"
         )
 
-    if clip.format.bits_per_sample != 8 and clip.format.sample_type != vs.INTEGER:
+    if clip.format.bits_per_sample != 8 or clip.format.sample_type != vs.INTEGER:
         clip = clip.resize.Bicubic(
-            format=clip.format.replace(
-                sample_type=vs.INTEGER, bits_per_sample=8
-            ).id, dither_type='error_diffusion'
+            range=None, range_in=None,
+            dither_type='error_diffusion',
+            format=clip.format.replace(sample_type=vs.INTEGER, bits_per_sample=8).id
         )
 
     shape = (clip.height, clip.width)
@@ -100,41 +104,36 @@ def FFTSpectrum(
 
     if cache_key not in _fft_modifyframe_cache:
         if cuda:
-            fft_aligned_zeros = cupy.empty(shape, cupy.uint8, 'C')
+            fft_out_aligned_zeros = cupy.empty(shape, cupy.uint8, 'C')
             fft_cuplan_zeros = cupy.empty(shape, cupy.complex64, 'C')
 
             cuda_plan = cupyx.scipy.fftpack.get_fft_plan(
                 fft_cuplan_zeros, shape, fftw_cpu_kwargs['axes']
             )
         else:
-            fft_aligned_zeros = empty_aligned(shape, np.complex64)
+            fft_src_aligned_zeros = empty_aligned(shape, np.complex64)
+            fft_out_aligned_zeros = empty_aligned(shape, np.complex64)
+            fftw_obj = FFTW(
+                fft_src_aligned_zeros, fft_out_aligned_zeros, **fftw_cpu_kwargs
+            )
 
-        rollfunc = partial(_fast_roll, xh=clip.width // 2, yh=clip.height // 2,)
-
-        _modify_frame_args = dict(rollfunc=rollfunc, fft_out_arr=fft_aligned_zeros)
+        rollfunc = partial(_fast_roll, xh=clip.width // 2, yh=clip.height // 2)
 
         if cuda:
             _fft_modifyframe_cache[cache_key] = partial(
-                _fftspectrum_gpu_modifyframe, **_modify_frame_args,
+                _fftspectrum_gpu_modifyframe,
+                rollfunc=rollfunc, fft_out_arr=fft_out_aligned_zeros,
                 cuda_plan=cuda_plan, cuda_fout=fft_cuplan_zeros
             )
         else:
             _fft_modifyframe_cache[cache_key] = partial(
-                _fftspectrum_cpu_modifyframe, **_modify_frame_args
+                _fftspectrum_cpu_modifyframe, rollfunc=rollfunc, fftw_obj=fftw_obj
             )
-
-    truemax = 9.846
-
-    fft_thr = truemax / threshold
-
-    fft_scale = truemax * threshold * 1.1681139254640247
 
     _modify_frame_func = _fft_modifyframe_cache[cache_key]
 
     if cuda:
-        _modify_frame_func = partial(
-            _modify_frame_func, fft_thr=fft_thr, fft_scale=fft_scale
-        )
+        _modify_frame_func = partial(_modify_frame_func, threshold=threshold)
 
     blankclip = clip.std.BlankClip(
         format=vs.GRAY8 if cuda else vs.GRAYS, color=0, keep=True
@@ -156,8 +155,10 @@ def FFTSpectrum(
                 fftclip = fftclip.resize.Bicubic(src_top=h_mod / 2, src_left=w_mod / 2)
 
     if not cuda:
-        fftclip = fftclip.akarin.Expr(
-            f'x abs sqrt log abs S! S@ {fft_thr} > S@ {fft_scale} * 0 ?', vs.GRAY8
+        fftscaled = fftclip.akarin.Expr('x abs log 10 /')
+        fftstats = fftscaled.std.PlaneStats(prop='P')
+        fftclip = fftstats.akarin.Expr(
+            f'x x.PMax {threshold} / > x {_scale_val} x.PMax / * 0 ?', vs.GRAY8
         )
 
     return fftclip
