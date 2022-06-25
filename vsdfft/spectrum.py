@@ -8,9 +8,8 @@ import numpy as np
 import vapoursynth as vs
 from pyfftw import FFTW, empty_aligned  # type: ignore
 
-from .utils import (
-    cuda_available, cuda_error, cuda_stream, cufft, cupy, cupyx, fftw_cpu_kwargs, is_cuda_101
-)
+from .utils import cuda_available, cuda_error, cuda_stream, cufft, cupy, cupyx, fftw_cpu_kwargs
+
 
 core = vs.core
 
