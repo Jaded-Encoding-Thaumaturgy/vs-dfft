@@ -81,7 +81,7 @@ def FFTSpectrum(
 ) -> vs.VideoNode:
     assert clip.format
 
-    cuda = cuda_available if cuda is None else bool(cuda)
+    cuda = (cuda_available if cuda is None else bool(cuda)) and ((clip.width + 31) & ~31) == clip.width
 
     if cuda and not cuda_available:
         raise ValueError(
